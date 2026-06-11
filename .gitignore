@@ -1,1 +1,21 @@
 /gitignore
+# Model artifacts (large binary files — store separately)
+model/tesla_gru_model.keras
+model/tesla_scaler.pkl
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Virtual environment
+venv/
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Streamlit secrets
+.streamlit/secrets.toml
