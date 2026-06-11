@@ -5,16 +5,13 @@ Main Streamlit entry point for the Tesla Stock Price Prediction app.
 
 Responsibility:
     UI orchestration ONLY — no data logic, no model logic.
-    All heavy lifting is delegated to the utils/ modules.
 
 Structure:
-    1. Page configuration and custom CSS
-    2. Cached resource loaders (model + scaler)
-    3. Header and branding
+    1. Page config + CSS
+    2. Cached loaders (model + scaler)
+    3. Header
     4. Model information dashboard
-    5. Prediction tabs:
-       - Tab A: Live Tesla data via Yahoo Finance
-       - Tab B: User-uploaded CSV
+    5. Prediction tabs (Live / CSV), each with horizon selector
 
 Run:
     streamlit run app.py
@@ -24,36 +21,37 @@ import os
 import streamlit as st
 
 from utils.data_loader import (
-    fetch_live_data,
-    load_csv_data,
-    validate_dataframe,
-    get_latest_window,
+    fetch_live_data, load_csv_data,
+    validate_dataframe, get_latest_window,
 )
 from utils.preprocessing import load_scaler, preprocess_window
-from utils.predictor import load_model, predict, get_model_metadata
+from utils.predictor import (
+    load_model, predict,
+    predict_multi_step, get_model_metadata,
+)
 from utils.visualizer import (
-    plot_closing_price,
-    render_model_metrics,
-    render_prediction_output,
+    plot_closing_price, plot_multi_step_forecast,
+    render_model_metrics, render_multi_step_output,
     render_data_preview,
 )
+from utils.config import PREDICTION_HORIZONS
 
 
-# ── Paths ────────────────────────────────────────────────────────────────────
+# ── Paths ─────────────────────────────────────────────────────────────────────
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH  = os.path.join(BASE_DIR, "model", "tesla_gru_model.keras")
 SCALER_PATH = os.path.join(BASE_DIR, "model", "tesla_scaler.pkl")
 
 
-# ── Page Configuration ────────────────────────────────────────────────────────
+# ── Page Config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
     page_title="Tesla Stock Predictor",
     page_icon="🚗",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
-
 st.markdown("""
 <style>
 .main .block-container {
@@ -64,78 +62,46 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
-
-# ── Custom CSS ────────────────────────────────────────────────────────────────
-
 st.markdown("""
 <style>
-    /* Hide Streamlit default header/footer */
     #MainMenu, footer, header { visibility: hidden; }
-
-    /* Main background */
     .stApp { background-color: #0f0f0f; }
 
-    /* Tab styling */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        background-color: #1a1a1a;
-        border-radius: 12px;
-        padding: 4px;
+        gap: 8px; background-color: #1a1a1a;
+        border-radius: 12px; padding: 4px;
     }
     .stTabs [data-baseweb="tab"] {
-        border-radius: 8px;
-        padding: 8px 24px;
-        color: #888;
-        font-weight: 500;
+        border-radius: 8px; padding: 8px 24px;
+        color: #888; font-weight: 500;
     }
     .stTabs [aria-selected="true"] {
-        background-color: #E31937 !important;
-        color: white !important;
+        background-color: #E31937 !important; color: white !important;
     }
-
-    /* Metric cards */
     [data-testid="stMetric"] {
-        background-color: #1a1a1a;
-        border: 1px solid #2a2a2a;
-        border-radius: 12px;
-        padding: 16px;
+        background-color: #1a1a1a; border: 1px solid #2a2a2a;
+        border-radius: 12px; padding: 16px;
     }
     [data-testid="stMetricLabel"] { color: #888 !important; }
-    [data-testid="stMetricValue"] { color: #ffffff !important; font-size: 1.4rem !important; }
-
-    /* Buttons */
+    [data-testid="stMetricValue"] { color: #fff !important; font-size: 1.4rem !important; }
     .stButton > button {
-        background-color: #E31937;
-        color: white;
-        border: none;
-        border-radius: 8px;
-        padding: 10px 28px;
-        font-weight: 600;
-        font-size: 15px;
-        width: 100%;
-        transition: background 0.2s ease;
+        background-color: #E31937; color: white; border: none;
+        border-radius: 8px; padding: 10px 28px;
+        font-weight: 600; font-size: 15px; width: 100%;
     }
     .stButton > button:hover { background-color: #b5132b; }
-
-    /* Info boxes */
-    .stInfo {
-        background-color: #1a1a2e;
-        border-left: 4px solid #E31937;
-        border-radius: 4px;
-    }
-
-    /* Divider */
     hr { border-color: #2a2a2a !important; }
-
-    /* Section headers */
     h2, h3 { color: #ffffff !important; }
+
+    /* Radio group for horizon selector */
+    div[data-testid="stRadio"] > label {
+        color: #aaa !important; font-size: 14px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ── Cached Resource Loaders ───────────────────────────────────────────────────
-# @st.cache_resource: loads ONCE per session, survives reruns.
-# Without this, model + scaler reload on every button click (~3s latency each).
+# ── Cached Loaders ────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner="Loading GRU model...")
 def get_model():
@@ -147,43 +113,54 @@ def get_scaler():
     return load_scaler(SCALER_PATH)
 
 
-# ── Helper: run full prediction pipeline ─────────────────────────────────────
+# ── Prediction Pipeline Helper ────────────────────────────────────────────────
 
-def run_prediction(df, scaler, model, source: str) -> float:
+def run_prediction_pipeline(df, scaler, model, n_days: int) -> list[dict]:
     """
-    Execute the full prediction pipeline on a validated DataFrame.
+    Run either single-step or multi-step prediction.
+
+    Always returns a list[dict] for uniform handling in both tabs,
+    even for n_days=1 (list of one item).
 
     Args:
-        df     : Raw OHLCV DataFrame (>=60 rows).
-        scaler : Loaded MinMaxScaler.
+        df     : Validated OHLCV DataFrame (>= 60 rows).
+        scaler : Fitted MinMaxScaler.
         model  : Loaded GRU model.
-        source : 'Yahoo Finance' or 'Uploaded CSV'.
+        n_days : Forecast horizon (1, 5, or 10).
 
     Returns:
-        float: Predicted next-day Tesla closing price in USD.
+        list[dict]: Each dict has keys: day, date, close, is_real.
     """
-    window      = get_latest_window(df)        # (60, 5) correct order
-    model_input = preprocess_window(window, scaler)  # (1, 60, 5) scaled
-    price       = predict(model, model_input, scaler) # float USD
-    return price
+    window = get_latest_window(df)   # enforces (60, 5) + column order
+
+    if n_days == 1:
+        # Single step: use preprocess_window + predict directly
+        model_input = preprocess_window(window, scaler)
+        price = predict(model, model_input, scaler)
+        from datetime import datetime, timedelta
+        next_date = datetime.today()
+        while next_date.weekday() >= 5:
+            next_date += timedelta(days=1)
+        return [{"day": 1, "date": next_date.strftime("%Y-%m-%d"),
+                 "close": price, "is_real": False}]
+    else:
+        return predict_multi_step(model, window, scaler, n_days)
 
 
-# ── App Startup: load model and scaler once ───────────────────────────────────
+# ── Startup: load model + scaler ──────────────────────────────────────────────
 
-model_load_error  = None
-scaler_load_error = None
-model  = None
-scaler = None
+model_error = scaler_error = None
+model = scaler = None
 
 try:
     model = get_model()
 except Exception as e:
-    model_load_error = str(e)
+    model_error = str(e)
 
 try:
     scaler = get_scaler()
 except Exception as e:
-    scaler_load_error = str(e)
+    scaler_error = str(e)
 
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -193,12 +170,13 @@ st.markdown("""
     <div style="display:flex; align-items:center; gap:12px;">
         <span style="font-size:36px;">🚗</span>
         <div>
-            <h1 style="margin:0; color:#E31937; font-size:2rem; font-weight:700; letter-spacing:-0.5px;">
+            <h1 style="margin:0; color:#E31937; font-size:2rem;
+                       font-weight:700; letter-spacing:-0.5px;">
                 Tesla Stock Price Prediction
             </h1>
             <p style="margin:4px 0 0 0; color:#888; font-size:14px;">
-                GRU Deep Learning Model &nbsp;·&nbsp; 60-Day Lookback &nbsp;·&nbsp;
-                OHLCV Features &nbsp;·&nbsp; R² = 0.9603
+                GRU Deep Learning &nbsp;·&nbsp; 60-Day Lookback &nbsp;·&nbsp;
+                OHLCV Features &nbsp;·&nbsp; Forecast up to 10 Days
             </p>
         </div>
     </div>
@@ -207,55 +185,33 @@ st.markdown("""
 
 st.divider()
 
-
-# ── Model Load Error Banner ───────────────────────────────────────────────────
-# Show a prominent error if model/scaler files are missing.
-# App still renders — user can read instructions without crashing.
-
-if model_load_error:
-    st.error(
-        f"**Model file not found.**\n\n"
-        f"Place `tesla_gru_model.keras` inside the `model/` directory.\n\n"
-        f"Details: `{model_load_error}`"
-    )
-
-if scaler_load_error:
-    st.error(
-        f"**Scaler file not found.**\n\n"
-        f"Place `tesla_scaler.pkl` inside the `model/` directory.\n\n"
-        f"Details: `{scaler_load_error}`"
-    )
+# ── Error banners ──
+if model_error:
+    st.error(f"**Model file missing.** Place `tesla_gru_model.keras` in `model/`.\n\n`{model_error}`")
+if scaler_error:
+    st.error(f"**Scaler file missing.** Place `tesla_scaler.pkl` in `model/`.\n\n`{scaler_error}`")
 
 
-# ── Model Information Dashboard ───────────────────────────────────────────────
+# ── Model Info Dashboard ──────────────────────────────────────────────────────
 
 with st.expander("Model Information Dashboard", expanded=True):
-
     meta = get_model_metadata()
-
-    # Architecture info row
-    info_col1, info_col2, info_col3, info_col4 = st.columns(4)
-    with info_col1:
-        st.markdown("**Model Type**")
-        st.markdown(f"`{meta['model_name']}`")
-    with info_col2:
-        st.markdown("**Input Window**")
-        st.markdown(f"`{meta['input_window']} Trading Days`")
-    with info_col3:
-        st.markdown("**Features**")
-        st.markdown("`Open · High · Low · Close · Volume`")
-    with info_col4:
-        st.markdown("**Target**")
-        st.markdown(f"`{meta['target']}`")
-
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown("**Model Type**"); st.markdown(f"`{meta['model_name']}`")
+    with c2:
+        st.markdown("**Input Window**"); st.markdown("`60 Trading Days`")
+    with c3:
+        st.markdown("**Features**"); st.markdown("`Open · High · Low · Close · Volume`")
+    with c4:
+        st.markdown("**Target**"); st.markdown("`Next Day Closing Price`")
     st.markdown("##### Performance Metrics")
     render_model_metrics(meta)
-
 
 st.divider()
 
 
-# ── Prediction Tabs ───────────────────────────────────────────────────────────
+# ── Tabs ──────────────────────────────────────────────────────────────────────
 
 tab_live, tab_csv = st.tabs([
     "📡  Live Tesla Data  (Yahoo Finance)",
@@ -264,72 +220,129 @@ tab_live, tab_csv = st.tabs([
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# SHARED PREDICTION SECTION — rendered identically in both tabs
+# ════════════════════════════════════════════════════════════════════════════
+
+def render_prediction_section(tab_key: str, source: str):
+    """
+    Render the full prediction UI for one tab.
+
+    tab_key : 'live' or 'csv'  — used to namespace session_state keys.
+    source  : 'Yahoo Finance' or 'Uploaded CSV' — shown in cards + charts.
+    """
+    df_key         = f"{tab_key}_df"
+    pred_key       = f"{tab_key}_predictions"
+    err_key        = f"{tab_key}_predict_error"
+    horizon_key    = f"{tab_key}_horizon"
+
+    df = st.session_state.get(df_key)
+    if df is None:
+        return   # nothing fetched/uploaded yet — nothing to show
+
+    # ── Data preview + historical chart ──
+    st.markdown("#### Last 60 Trading Days")
+    render_data_preview(df.tail(60), source=source)
+
+    st.markdown("#### Closing Price Trend")
+    st.plotly_chart(
+        plot_closing_price(df.tail(60), source=source),
+        use_container_width=True,
+    )
+
+    st.divider()
+
+    # ── Prediction horizon selector ──
+    st.markdown("#### Prediction Horizon")
+    horizon_label = st.radio(
+        "Select forecast window:",
+        options=list(PREDICTION_HORIZONS.keys()),
+        horizontal=True,
+        key=horizon_key,
+        help=(
+            "Next Day: single prediction using 60 real trading days.  \n"
+            "5 / 10 Days: recursive forecast — error compounds with each step."
+        ),
+    )
+    n_days = PREDICTION_HORIZONS[horizon_label]
+
+    # Context note for multi-step
+    if n_days > 1:
+        st.info(
+            f"**{horizon_label} forecast** uses recursive prediction: each predicted "
+            f"day is fed back as input for the next. "
+            f"Day 1 uses 60 real rows. By day {n_days}, {n_days - 1} synthetic "
+            f"rows are in the window. Confidence decreases with each step."
+        )
+
+    # ── Predict button ──
+    predict_disabled = (model is None or scaler is None)
+    if predict_disabled:
+        st.warning("Prediction unavailable — model or scaler file missing.")
+        return
+
+    btn_label = (
+        "Predict Next Day Closing Price"
+        if n_days == 1
+        else f"Predict Next {n_days} Days"
+    )
+
+    if st.button(btn_label, key=f"btn_predict_{tab_key}"):
+        spinner_msg = (
+            "Running GRU inference..."
+            if n_days == 1
+            else f"Running recursive GRU forecast for {n_days} days..."
+        )
+        with st.spinner(spinner_msg):
+            try:
+                predictions = run_prediction_pipeline(df, scaler, model, n_days)
+                st.session_state[pred_key]  = predictions
+                st.session_state[err_key]   = None
+            except Exception as e:
+                st.session_state[err_key]   = str(e)
+                st.session_state[pred_key]  = None
+
+    # ── Error ──
+    if st.session_state.get(err_key):
+        st.error(f"Prediction failed: {st.session_state[err_key]}")
+
+    # ── Results ──
+    predictions = st.session_state.get(pred_key)
+    if predictions:
+        # Show forecast chart for multi-step, prediction card for single
+        if len(predictions) > 1:
+            st.markdown("#### Forecast Chart")
+            st.plotly_chart(
+                plot_multi_step_forecast(df.tail(60), predictions),
+                use_container_width=True,
+            )
+
+        st.markdown("#### Prediction Result")
+        render_multi_step_output(predictions, source=source)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # TAB A — Live Tesla Data
 # ════════════════════════════════════════════════════════════════════════════
 
 with tab_live:
-
     st.markdown("### Live Tesla Stock Prediction")
     st.markdown(
-        "Fetches the latest Tesla OHLCV data from Yahoo Finance and predicts "
-        "the **next trading day's closing price** using the last 60 trading days."
+        "Fetches the latest Tesla OHLCV data from Yahoo Finance, then predicts "
+        "the next **1, 5, or 10 trading days** using the GRU model."
     )
 
-    # ── Fetch data on button click ──
     if st.button("Fetch Latest Tesla Data", key="btn_fetch"):
-
-        with st.spinner("Fetching data from Yahoo Finance..."):
+        with st.spinner("Fetching from Yahoo Finance..."):
             try:
                 live_df = fetch_live_data()
-                # Store in session state so data persists across reruns
-                st.session_state["live_df"] = live_df
-                st.session_state["live_fetch_error"] = None
+                st.session_state["live_df"]           = live_df
+                st.session_state["live_predictions"]  = None
+                st.session_state["live_predict_error"]= None
             except Exception as e:
-                st.session_state["live_fetch_error"] = str(e)
+                st.error(f"Fetch failed: {e}")
                 st.session_state["live_df"] = None
 
-    # ── Show fetch error if any ──
-    if st.session_state.get("live_fetch_error"):
-        st.error(f"Data fetch failed: {st.session_state['live_fetch_error']}")
-
-    # ── Show data + prediction if fetch succeeded ──
-    if st.session_state.get("live_df") is not None:
-        live_df = st.session_state["live_df"]
-
-        # Data preview
-        st.markdown("#### Last 60 Trading Days")
-        render_data_preview(live_df.tail(60), source="Yahoo Finance")
-
-        # Closing price chart
-        st.markdown("#### Closing Price Trend")
-        fig = plot_closing_price(live_df.tail(60), source="Yahoo Finance")
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.divider()
-
-        # Predict button
-        predict_disabled = (model is None or scaler is None)
-        if predict_disabled:
-            st.warning("Prediction unavailable — model or scaler file missing.")
-        else:
-            if st.button("Predict Next Day Closing Price", key="btn_predict_live"):
-                with st.spinner("Running GRU model inference..."):
-                    try:
-                        price = run_prediction(live_df, scaler, model, "Yahoo Finance")
-                        st.session_state["live_prediction"] = price
-                        st.session_state["live_predict_error"] = None
-                    except Exception as e:
-                        st.session_state["live_predict_error"] = str(e)
-                        st.session_state["live_prediction"] = None
-
-            if st.session_state.get("live_predict_error"):
-                st.error(f"Prediction failed: {st.session_state['live_predict_error']}")
-
-            if st.session_state.get("live_prediction") is not None:
-                render_prediction_output(
-                    price=st.session_state["live_prediction"],
-                    source="Yahoo Finance",
-                )
+    render_prediction_section(tab_key="live", source="Yahoo Finance")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -337,86 +350,40 @@ with tab_live:
 # ════════════════════════════════════════════════════════════════════════════
 
 with tab_csv:
-
     st.markdown("### Custom CSV Prediction")
     st.markdown(
-        "Upload a CSV file containing historical Tesla OHLCV data. "
-        "The model will use the **last 60 rows** for prediction."
+        "Upload historical Tesla OHLCV data. "
+        "The model will forecast up to **10 trading days** ahead."
     )
 
-    # Requirements callout
     st.info(
         "**CSV Requirements**\n"
-        "- Required columns: `Open`, `High`, `Low`, `Close`, `Volume`\n"
-        "- Minimum rows: 60 (trading days)\n"
-        "- Column names are case-insensitive\n"
-        "- Optional: a `Date` column (will be used as index)"
+        "- Columns: `Open`, `High`, `Low`, `Close`, `Volume`  (case-insensitive)\n"
+        "- Minimum 60 rows\n"
+        "- Optional `Date` column used as index"
     )
 
     uploaded_file = st.file_uploader(
-        "Choose a CSV file",
-        type=["csv"],
-        key="csv_uploader",
-        help="Upload historical Tesla OHLCV data with at least 60 rows.",
+        "Choose a CSV file", type=["csv"], key="csv_uploader",
     )
 
     if uploaded_file is not None:
-
         with st.spinner("Reading and validating CSV..."):
             try:
                 csv_df = load_csv_data(uploaded_file)
-                is_valid, validation_msg = validate_dataframe(csv_df)
-
+                is_valid, msg = validate_dataframe(csv_df)
                 if not is_valid:
-                    st.error(f"Validation failed: {validation_msg}")
-                    csv_df = None
+                    st.error(f"Validation failed: {msg}")
                 else:
-                    st.success(
-                        f"File loaded successfully — "
-                        f"{len(csv_df)} rows · {len(csv_df.columns)} columns"
-                    )
-                    st.session_state["csv_df"] = csv_df
-                    st.session_state["csv_error"] = None
-
+                    st.success(f"Loaded — {len(csv_df)} rows · {len(csv_df.columns)} columns")
+                    st.session_state["csv_df"]           = csv_df
+                    st.session_state["csv_predictions"]  = None
+                    st.session_state["csv_predict_error"]= None
             except Exception as e:
                 st.error(f"Could not read file: {e}")
                 st.session_state["csv_df"] = None
 
-        # ── Show data + prediction if CSV is valid ──
-        if st.session_state.get("csv_df") is not None:
-            csv_df = st.session_state["csv_df"]
-
-            st.markdown("#### Last 60 Rows Preview")
-            render_data_preview(csv_df.tail(60), source="Uploaded CSV")
-
-            st.markdown("#### Closing Price Trend")
-            fig_csv = plot_closing_price(csv_df.tail(60), source="Uploaded CSV")
-            st.plotly_chart(fig_csv, use_container_width=True)
-
-            st.divider()
-
-            predict_disabled = (model is None or scaler is None)
-            if predict_disabled:
-                st.warning("Prediction unavailable — model or scaler file missing.")
-            else:
-                if st.button("Predict Next Day Closing Price", key="btn_predict_csv"):
-                    with st.spinner("Running GRU model inference..."):
-                        try:
-                            price = run_prediction(csv_df, scaler, model, "Uploaded CSV")
-                            st.session_state["csv_prediction"] = price
-                            st.session_state["csv_predict_error"] = None
-                        except Exception as e:
-                            st.session_state["csv_predict_error"] = str(e)
-                            st.session_state["csv_prediction"] = None
-
-                if st.session_state.get("csv_predict_error"):
-                    st.error(f"Prediction failed: {st.session_state['csv_predict_error']}")
-
-                if st.session_state.get("csv_prediction") is not None:
-                    render_prediction_output(
-                        price=st.session_state["csv_prediction"],
-                        source="Uploaded CSV",
-                    )
+    render_prediction_section(tab_key="csv", source="Uploaded CSV")
 
 
 # ── Footer ────────────────────────────────────────────────────────────────────
@@ -424,9 +391,8 @@ with tab_csv:
 st.divider()
 st.markdown(
     "<p style='text-align:center; color:#444; font-size:12px;'>"
-    "Tesla Stock Price Prediction &nbsp;·&nbsp; GRU Deep Learning &nbsp;·&nbsp; "
-    "Built with Streamlit &nbsp;·&nbsp; For educational purposes only &nbsp;·&nbsp; "
-    "Not financial advice"
+    "Tesla Stock Price Prediction &nbsp;·&nbsp; GRU Deep Learning &nbsp;·&nbsp;"
+    " For educational purposes only &nbsp;·&nbsp; Not financial advice"
     "</p>",
     unsafe_allow_html=True,
 )

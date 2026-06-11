@@ -32,3 +32,20 @@ FETCH_DAYS_BUFFER = 120
 # ── Model Files ───────────────────────────────────────────────────────────────
 MODEL_FILENAME  = "tesla_gru_model.keras"
 SCALER_FILENAME = "tesla_scaler.pkl"
+
+# ── Multi-Step Forecasting ────────────────────────────────────────────────────
+# Available prediction horizons shown in the UI selector.
+PREDICTION_HORIZONS = {
+    "Next Day (1)":    1,
+    "Up to 5 Days":    5,
+    "Up to 10 Days":  10,
+}
+
+# Number of recent days used to compute rolling Volume average for
+# synthetic rows during recursive forecasting.
+VOLUME_ROLLING_WINDOW = 20
+
+# Number of recent days used to compute average High-Low daily range
+# as a percentage of Close — used to synthesize High and Low for
+# predicted days.
+RANGE_ROLLING_WINDOW = 20

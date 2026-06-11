@@ -3,47 +3,40 @@ predictor.py
 ------------
 Handles GRU model loading and inference for Tesla stock price prediction.
 
-Responsibilities:
-    - Load the saved GRU model from disk (.keras format).
-    - Validate model input shape before inference.
-    - Run prediction and return the final USD price as a float.
-    - Expose model metadata for the UI dashboard.
-
-Design note:
-    load_model() and load_scaler() are kept separate from predict()
-    intentionally. In app.py, both will be wrapped with
-    @st.cache_resource so they load ONCE per session — not on
-    every prediction call.
-
 Public API:
-    load_model(model_path)                    -> tf.keras.Model
-    predict(model, model_input, scaler)       -> float  (USD price)
-    get_model_metadata()                      -> dict
+    load_model(model_path)                          -> tf.keras.Model
+    predict(model, model_input, scaler)             -> float
+    predict_multi_step(model, window_df, scaler, n) -> list[dict]
+    get_model_metadata()                            -> dict
 """
 
 import numpy as np
+import pandas as pd
 import os
+from datetime import datetime, timedelta
 
-# Suppress TensorFlow INFO/WARNING logs — only show errors
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 import tensorflow as tf
 
-from utils.preprocessing import inverse_transform_prediction
+from utils.preprocessing import preprocess_window, inverse_transform_prediction
+from utils.config import (
+    LOOKBACK_WINDOW, FEATURE_COLUMNS,
+    VOLUME_ROLLING_WINDOW, RANGE_ROLLING_WINDOW,
+)
 
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-EXPECTED_INPUT_SHAPE = (None, 60, 5)   # (batch, timesteps, features)
-EXPECTED_OUTPUT_UNITS = 1              # Single Close price prediction
+EXPECTED_INPUT_SHAPE  = (None, 60, 5)
+EXPECTED_OUTPUT_UNITS = 1
 
-# Model performance metrics — source: training notebook
 MODEL_METADATA = {
-    "model_name": "GRU Neural Network",
-    "model_file": "tesla_gru_model.keras",
+    "model_name":   "GRU Neural Network",
+    "model_file":   "tesla_gru_model.keras",
     "input_window": 60,
-    "features": ["Open", "High", "Low", "Close", "Volume"],
-    "target": "Next Day Closing Price",
+    "features":     FEATURE_COLUMNS,
+    "target":       "Next Day Closing Price",
     "metrics": {
         "MAE":  "8.81 USD",
         "RMSE": "15.22 USD",
@@ -59,20 +52,12 @@ def load_model(model_path: str) -> tf.keras.Model:
     """
     Load the pre-trained GRU model from a .keras file.
 
-    Designed to be called once and cached via @st.cache_resource in app.py.
-    Validates that the loaded model has the correct input/output shape
-    to catch wrong model files early.
-
-    Args:
-        model_path (str): Path to tesla_gru_model.keras.
-
-    Returns:
-        tf.keras.Model: Compiled and ready-to-predict GRU model.
+    Validates input shape (None, 60, 5) and output units (1).
 
     Raises:
-        FileNotFoundError: If the .keras file is not found.
-        ValueError: If the model input/output shape is unexpected.
-        RuntimeError: If TensorFlow fails to load the model.
+        FileNotFoundError: If model file is absent.
+        ValueError: If shapes don't match expectations.
+        RuntimeError: If TensorFlow fails to load.
     """
     if not os.path.exists(model_path):
         raise FileNotFoundError(
@@ -84,89 +69,192 @@ def load_model(model_path: str) -> tf.keras.Model:
         model = tf.keras.models.load_model(model_path)
     except Exception as e:
         raise RuntimeError(
-            f"TensorFlow failed to load the model from '{model_path}'.\n"
-            f"Ensure the file is a valid Keras model. Error: {e}"
+            f"TensorFlow failed to load model from '{model_path}': {e}"
         )
 
-    # ── Validate input shape ──
-    # model.input_shape = (None, 60, 5) — batch dim is None (flexible)
-    actual_input_shape = model.input_shape
-    if actual_input_shape != EXPECTED_INPUT_SHAPE:
+    if model.input_shape != EXPECTED_INPUT_SHAPE:
         raise ValueError(
             f"Model input shape mismatch.\n"
-            f"Expected: {EXPECTED_INPUT_SHAPE}\n"
-            f"Got:      {actual_input_shape}\n"
-            "Ensure you are using the correct tesla_gru_model.keras file."
+            f"Expected: {EXPECTED_INPUT_SHAPE}\nGot: {model.input_shape}"
         )
 
-    # ── Validate output shape ──
-    # Output should be (None, 1) — single predicted Close price
-    actual_output_shape = model.output_shape
-    if actual_output_shape[-1] != EXPECTED_OUTPUT_UNITS:
+    if model.output_shape[-1] != EXPECTED_OUTPUT_UNITS:
         raise ValueError(
             f"Model output units mismatch.\n"
-            f"Expected: {EXPECTED_OUTPUT_UNITS} output unit(s)\n"
-            f"Got:      {actual_output_shape[-1]}\n"
-            "Ensure you are using the correct tesla_gru_model.keras file."
+            f"Expected: {EXPECTED_OUTPUT_UNITS}\nGot: {model.output_shape[-1]}"
         )
 
     return model
 
 
-# ── Prediction ────────────────────────────────────────────────────────────────
+# ── Single-Step Prediction ────────────────────────────────────────────────────
 
 def predict(model: tf.keras.Model, model_input: np.ndarray, scaler) -> float:
     """
-    Run inference on preprocessed input and return the predicted USD price.
-
-    Pipeline:
-        model_input: np.ndarray (1, 60, 5)
-            -> model.predict()                -> scaled output (1, 1)
-            -> extract scalar float           -> e.g. 0.6823
-            -> inverse_transform_prediction() -> e.g. 280.45
-
-    Args:
-        model (tf.keras.Model): Loaded GRU model from load_model().
-        model_input (np.ndarray): Preprocessed array of shape (1, 60, 5).
-        scaler: Fitted MinMaxScaler from load_scaler().
+    Run inference on a preprocessed (1, 60, 5) array.
 
     Returns:
-        float: Predicted next-day Tesla closing price in USD.
-
-    Raises:
-        ValueError: If model_input has wrong shape.
-        RuntimeError: If model inference fails.
+        float: Predicted next-day Tesla closing price in USD (2dp).
     """
-    # ── Validate input shape ──
     if model_input.shape != (1, 60, 5):
         raise ValueError(
-            f"model_input has wrong shape: {model_input.shape}. "
-            "Expected (1, 60, 5). Pass the output of preprocess_window() directly."
+            f"model_input shape {model_input.shape} — expected (1, 60, 5)."
         )
 
-    # ── Run inference ──
-    # verbose=0 suppresses the TF progress bar in Streamlit logs
     try:
         raw_output = model.predict(model_input, verbose=0)
     except Exception as e:
         raise RuntimeError(f"Model inference failed: {e}")
 
-    # raw_output shape: (1, 1) — extract the single scalar value
-    scaled_prediction = float(raw_output[0][0])
+    scaled_pred = float(raw_output[0][0])
+    return round(inverse_transform_prediction(scaled_pred, scaler), 2)
 
-    # ── Inverse transform to USD ──
-    predicted_price = inverse_transform_prediction(scaled_prediction, scaler)
 
-    return round(predicted_price, 2)
+# ── Multi-Step Recursive Forecasting ─────────────────────────────────────────
+
+def predict_multi_step(
+    model:     tf.keras.Model,
+    window_df: pd.DataFrame,
+    scaler,
+    n_days:    int,
+) -> list[dict]:
+    """
+    Recursively forecast up to n_days ahead using the single-step GRU.
+
+    ALGORITHM (recursive / auto-regressive forecasting):
+    -------------------------------------------------------
+    Each predicted Close is fed back as part of a synthetic OHLCV row
+    to build the next 60-day window:
+
+        Step 1:  window = last 60 real rows
+                 predict → Close_1
+                 build synthetic_row_1 = [Open, High, Low, Close_1, Volume]
+
+        Step 2:  window = rows [1:60] + synthetic_row_1
+                 predict → Close_2
+                 build synthetic_row_2 ...
+
+        ...repeat for n_days steps.
+
+    SYNTHETIC ROW CONSTRUCTION:
+    -------------------------------------------------------
+    Since the model only predicts Close, the other 4 features are
+    estimated from historical statistics of the real window:
+
+        Open   = previous day's Close        (gap-open assumption)
+        High   = pred_close * (1 + avg_hl%)  (avg daily range from real data)
+        Low    = pred_close * (1 - avg_hl%)
+        Volume = rolling mean of last 20 days (real data only)
+
+    WHY ERROR COMPOUNDS:
+    -------------------------------------------------------
+    Day 1:  input = 60 real rows      → most accurate
+    Day 2:  input = 59 real + 1 synth → small error
+    Day 5:  input = 55 real + 5 synth → moderate error
+    Day 10: input = 50 real + 10 synth → highest uncertainty
+
+    The MAPE of 2.77% applies to day 1 ONLY. Days 5–10 carry
+    significantly higher uncertainty and should be read as a
+    directional trend, not a precise price target.
+
+    Args:
+        model     : Loaded GRU model.
+        window_df : DataFrame with >= 60 OHLCV rows (real historical data).
+        scaler    : Fitted MinMaxScaler.
+        n_days    : Number of future days to forecast (1, 5, or 10).
+
+    Returns:
+        list[dict]: One dict per predicted day, each containing:
+            {
+              "day":        int   (1-indexed step),
+              "date":       str   (estimated trading date, YYYY-MM-DD),
+              "close":      float (predicted USD price),
+              "is_real":    bool  (always False — these are predictions),
+            }
+    """
+    if n_days < 1:
+        raise ValueError(f"n_days must be >= 1, got {n_days}")
+
+    if len(window_df) < LOOKBACK_WINDOW:
+        raise ValueError(
+            f"window_df has {len(window_df)} rows — need at least {LOOKBACK_WINDOW}."
+        )
+
+    # ── Working buffer — starts as copy of the real data ──
+    # We will append synthetic rows here and always take the last 60 for input.
+    buffer = window_df[FEATURE_COLUMNS].copy().reset_index(drop=True)
+
+    # ── Pre-compute statistics from REAL data only ──
+    # These never update with synthetic rows — avoids compounding stat errors.
+    real_close  = buffer["Close"].values.astype(float)
+    real_high   = buffer["High"].values.astype(float)
+    real_low    = buffer["Low"].values.astype(float)
+    real_volume = buffer["Volume"].values.astype(float)
+
+    # Average High-Low range as fraction of Close (e.g. 0.025 = 2.5%)
+    daily_hl_range = (real_high - real_low) / real_close
+    avg_hl_pct = float(np.mean(daily_hl_range[-RANGE_ROLLING_WINDOW:]))
+
+    # Rolling volume mean from real data
+    avg_volume = float(np.mean(real_volume[-VOLUME_ROLLING_WINDOW:]))
+
+    # ── Estimate last real trading date ──
+    if isinstance(window_df.index, pd.DatetimeIndex):
+        last_date = window_df.index[-1].to_pydatetime()
+    else:
+        last_date = datetime.today()
+
+    # ── Recursive prediction loop ──
+    predictions = []
+
+    for step in range(1, n_days + 1):
+        # Take the last 60 rows of the buffer as the current window
+        current_window = buffer.tail(LOOKBACK_WINDOW).copy()
+        current_window.reset_index(drop=True, inplace=True)
+
+        # Preprocess and predict
+        model_input  = preprocess_window(current_window, scaler)
+        raw_output   = model.predict(model_input, verbose=0)
+        scaled_pred  = float(raw_output[0][0])
+        pred_close   = round(inverse_transform_prediction(scaled_pred, scaler), 2)
+
+        # ── Estimate next trading date (skip weekends) ──
+        next_date = last_date + timedelta(days=1)
+        while next_date.weekday() >= 5:   # 5=Sat, 6=Sun
+            next_date += timedelta(days=1)
+        last_date = next_date
+
+        # ── Build synthetic OHLCV row ──
+        # Open: previous Close (standard gap-open assumption)
+        prev_close = float(buffer["Close"].iloc[-1])
+        synth_open   = prev_close
+        synth_high   = round(pred_close * (1 + avg_hl_pct), 4)
+        synth_low    = round(pred_close * (1 - avg_hl_pct), 4)
+        synth_volume = avg_volume
+
+        synthetic_row = pd.DataFrame([{
+            "Open":   synth_open,
+            "High":   synth_high,
+            "Low":    synth_low,
+            "Close":  pred_close,
+            "Volume": synth_volume,
+        }])
+
+        # Append to buffer — next iteration uses this row in its window
+        buffer = pd.concat([buffer, synthetic_row], ignore_index=True)
+
+        predictions.append({
+            "day":     step,
+            "date":    next_date.strftime("%Y-%m-%d"),
+            "close":   pred_close,
+            "is_real": False,
+        })
+
+    return predictions
 
 
 # ── Metadata ──────────────────────────────────────────────────────────────────
 
 def get_model_metadata() -> dict:
-    """
-    Return model configuration and performance metrics for the UI dashboard.
-
-    Returns:
-        dict: Model name, input specs, and evaluation metrics.
-    """
+    """Return model config and performance metrics for the UI dashboard."""
     return MODEL_METADATA
