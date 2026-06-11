@@ -51,10 +51,19 @@ SCALER_PATH = os.path.join(BASE_DIR, "model", "tesla_scaler.pkl")
 st.set_page_config(
     page_title="Tesla Stock Predictor",
     page_icon="🚗",
-    layout="wide",
-    initial_sidebar_state="collapsed",
+    layout="wide"
 )
 
+st.markdown("""
+<style>
+.main .block-container {
+    padding-top: 1rem;
+    padding-bottom: 1rem;
+    padding-left: 2rem;
+    padding-right: 2rem;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ── Custom CSS ────────────────────────────────────────────────────────────────
 
