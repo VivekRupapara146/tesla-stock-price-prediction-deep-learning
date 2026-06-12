@@ -23,9 +23,3 @@ Thumbs.db
 
 # Streamlit
 .streamlit/
-
-# Model artifacts (optional)
-# Uncomment if hosting models externally
-# *.keras
-# *.h5
-# *.pkl 
