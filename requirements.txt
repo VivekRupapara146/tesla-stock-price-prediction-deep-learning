@@ -1,13 +1,20 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Tesla Stock Price Prediction — Python Dependencies
-# ─────────────────────────────────────────────────────────────────────────────
-# Note: yfinance and requests have been removed.
-# Live data fetching is not active in the current version.
-# The app currently supports CSV upload only.
+#
+# IMPORTANT — TensorFlow version:
+# Pin tensorflow to the SAME version used when training your model.
+# Mismatch causes: "Unrecognized keyword arguments: [batch_shape, optional]"
+#
+#   TF <= 2.15  →  uses Keras 2 (batch_shape in InputLayer config)
+#   TF >= 2.16  →  uses Keras 3 (different serialization format)
+#
+# Check your training version with:
+#   python -c "import tensorflow as tf; print(tf.__version__)"
+# Then set that exact version below.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Core ML / Deep Learning
-tensorflow==2.15.0
+tensorflow==2.15.0      # ← change this to match your training environment
 scikit-learn==1.4.2
 numpy==1.26.4
 

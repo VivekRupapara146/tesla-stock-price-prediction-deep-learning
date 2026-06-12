@@ -53,12 +53,29 @@ def load_model(model_path: str) -> tf.keras.Model:
     """
     Load the pre-trained GRU model from a .keras file.
 
-    Validates input shape (None, 60, 5) and output units (1).
+    THREE-STRATEGY LOADING — handles TF version mismatches:
+    --------------------------------------------------------
+    The error "Unrecognized keyword arguments: [batch_shape, optional]"
+    means the model was saved with Keras 2 (TF <= 2.15) but is being
+    loaded with Keras 3 (TF >= 2.16), where InputLayer serialization
+    changed. Each strategy below targets a different TF/Keras version.
+
+    Strategy 1 — compile=False
+        Skips optimizer reconstruction. Works for most cross-version
+        loading issues where only the optimizer config is incompatible.
+
+    Strategy 2 — safe_mode=False (Keras 3 / TF 2.16+)
+        Disables strict config validation. Allows loading models whose
+        layer configs contain unrecognized keys like batch_shape.
+
+    Strategy 3 — tf.saved_model.load()
+        Low-level loader that bypasses Keras layer config entirely.
+        Last resort for severe version mismatches.
 
     Raises:
-        FileNotFoundError: If model file is absent.
-        ValueError: If shapes don't match expectations.
-        RuntimeError: If TensorFlow fails to load.
+        FileNotFoundError: Model file absent.
+        ValueError: Loaded model has wrong input/output shape.
+        RuntimeError: All three strategies failed.
     """
     if not os.path.exists(model_path):
         raise FileNotFoundError(
@@ -66,13 +83,47 @@ def load_model(model_path: str) -> tf.keras.Model:
             "Place tesla_gru_model.keras inside the model/ directory."
         )
 
+    model  = None
+    errors = []
+
+    # ── Strategy 1: compile=False ──
     try:
-        model = tf.keras.models.load_model(model_path)
+        model = tf.keras.models.load_model(model_path, compile=False)
     except Exception as e:
+        errors.append(f"[1] compile=False: {e}")
+
+    # ── Strategy 2: safe_mode=False (Keras 3 / TF 2.16+) ──
+    if model is None:
+        try:
+            model = tf.keras.models.load_model(
+                model_path,
+                compile=False,
+                safe_mode=False,
+            )
+        except Exception as e:
+            errors.append(f"[2] safe_mode=False: {e}")
+
+    # ── Strategy 3: tf.saved_model low-level loader ──
+    if model is None:
+        try:
+            loaded   = tf.saved_model.load(model_path)
+            infer    = loaded.signatures["serving_default"]
+            inp      = tf.keras.Input(shape=(60, 5), dtype=tf.float32)
+            out_dict = infer(inp)
+            out      = list(out_dict.values())[0]
+            model    = tf.keras.Model(inputs=inp, outputs=out)
+        except Exception as e:
+            errors.append(f"[3] saved_model.load: {e}")
+
+    if model is None:
         raise RuntimeError(
-            f"TensorFlow failed to load model from '{model_path}': {e}"
+            "All model loading strategies failed.\n"
+            + "\n".join(errors)
+            + "\n\nPermanent fix: re-save your model with your current TF version:\n"
+            "  model.save('model/tesla_gru_model.keras')"
         )
 
+    # ── Shape validation ──
     if model.input_shape != EXPECTED_INPUT_SHAPE:
         raise ValueError(
             f"Model input shape mismatch.\n"
