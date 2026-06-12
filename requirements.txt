@@ -14,7 +14,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Core ML / Deep Learning
-tensorflow==2.15.0      # ← change this to match your training environment
+tensorflow==2.16.1      # ← change this to match your training environment
 scikit-learn==1.4.2
 numpy==1.26.4
 
