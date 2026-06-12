@@ -351,9 +351,9 @@ Do not make investment decisions based on this tool.
 
 ## 👤 Author
 
-**Vivek**
+**Vivek Rupapara**
 ML Engineering Intern | Building toward production-grade AI systems
 
 ---
 
-*Built with Streamlit · GRU Deep Learning · Tesla OHLCV Data*
+*Built with Streamlit · GRU Deep Learning · Tesla OHLCV Data · Claude AI*
