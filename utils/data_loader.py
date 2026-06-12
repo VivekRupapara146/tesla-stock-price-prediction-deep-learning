@@ -69,34 +69,81 @@ _HEADERS = {
 }
 
 
+def _get_yahoo_crumb() -> tuple:
+    """
+    Obtain a Yahoo Finance session + crumb token.
+
+    Yahoo Finance requires a crumb token (since 2024) for all data
+    download endpoints. The process:
+        1. Visit finance.yahoo.com to receive session cookies.
+        2. Call the /v1/test/getcrumb endpoint with those cookies.
+        3. The returned string is the crumb — include it in download URLs.
+
+    Returns:
+        tuple: (requests.Session with cookies, crumb string)
+
+    Raises:
+        ConnectionError: If crumb cannot be fetched.
+    """
+    session = requests.Session()
+    session.headers.update(_HEADERS)
+
+    # Step 1 — establish session cookies by visiting Yahoo Finance
+    try:
+        session.get("https://finance.yahoo.com/", timeout=10)
+    except Exception:
+        pass   # cookies may still be set even on soft failures
+
+    # Step 2 — fetch crumb token
+    try:
+        crumb_resp = session.get(
+            "https://query2.finance.yahoo.com/v1/test/getcrumb",
+            timeout=10,
+        )
+        crumb = crumb_resp.text.strip()
+        if not crumb or "<" in crumb:   # HTML response = auth failed
+            raise ValueError(f"Invalid crumb response: {crumb[:80]}")
+    except Exception as e:
+        raise ConnectionError(f"Failed to obtain Yahoo Finance crumb: {e}")
+
+    return session, crumb
+
+
 def _fetch_via_direct_csv() -> pd.DataFrame:
     """
-    Fetch OHLCV data by downloading Yahoo Finance CSV directly.
+    Fetch OHLCV data via authenticated Yahoo Finance CSV download.
 
     WHY THIS EXISTS:
-    Yahoo Finance changed its API in 2024 to require a crumb/cookie
-    for JSON endpoints. yfinance tries to obtain this automatically
-    but frequently fails, returning an empty JSON body — causing:
+    Both yfinance methods fail when Yahoo Finance returns an empty
+    JSON body (401/crumb issue), causing:
         JSONDecodeError: Expecting value: line 1 column 1 (char 0)
 
-    The v7/finance/download CSV endpoint still works with just a
-    proper User-Agent header and does not require a crumb cookie.
-    This makes it the most reliable fallback for live data.
+    This method bypasses yfinance entirely by:
+        1. Obtaining a real browser session + crumb from Yahoo.
+        2. Hitting the v7/finance/download CSV endpoint directly.
+        3. Parsing the response with pandas — no yfinance involved.
     """
     end_ts   = int(datetime.today().timestamp())
     start_ts = int((datetime.today() - timedelta(days=FETCH_DAYS_BUFFER)).timestamp())
+
+    # Get authenticated session + crumb
+    session, crumb = _get_yahoo_crumb()
 
     url = (
         f"https://query1.finance.yahoo.com/v7/finance/download/{TICKER}"
         f"?period1={start_ts}&period2={end_ts}"
         f"&interval=1d&events=history&includeAdjustedClose=true"
+        f"&crumb={crumb}"
     )
-
-    session = requests.Session()
-    session.headers.update(_HEADERS)
 
     response = session.get(url, timeout=15)
     response.raise_for_status()
+
+    # Verify we got CSV and not an HTML error page
+    if not response.text.startswith("Date"):
+        raise ValueError(
+            f"Unexpected response (expected CSV): {response.text[:120]}"
+        )
 
     df = pd.read_csv(
         io.StringIO(response.text),
@@ -104,8 +151,7 @@ def _fetch_via_direct_csv() -> pd.DataFrame:
         index_col="Date",
     )
 
-    # CSV columns: Open, High, Low, Close, Adj Close, Volume
-    # Rename Adj Close → Close (adjusted prices preferred), drop original Close
+    # Rename Adj Close → Close (adjusted prices match training data)
     if "Adj Close" in df.columns:
         df = df.drop(columns=["Close"], errors="ignore")
         df = df.rename(columns={"Adj Close": "Close"})
