@@ -49,3 +49,20 @@ VOLUME_ROLLING_WINDOW = 20
 # as a percentage of Close — used to synthesize High and Low for
 # predicted days.
 RANGE_ROLLING_WINDOW = 20
+
+# ── Momentum Correction (anti-drift) ─────────────────────────────────────────
+# Recursive forecasting causes predictions to drift toward the training mean
+# because each synthetic row reinforces the model's last signal.
+# These constants control a momentum blend that anchors predictions to the
+# recent real-data trend as uncertainty grows with each step.
+
+# Number of recent real Close prices used to compute the linear trend slope.
+TREND_WINDOW = 20
+
+# How much model trust decays per forecast step (0.0 = no decay, 1.0 = instant).
+# At 0.08: day-1 weight = 0.92, day-5 weight = 0.60, day-10 weight = 0.30.
+TREND_BLEND_DECAY = 0.08
+
+# Minimum model weight — model always has at least this influence even at day 10.
+# Prevents the forecast from becoming a pure linear extrapolation.
+MIN_MODEL_WEIGHT = 0.30

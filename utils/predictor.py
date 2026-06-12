@@ -23,6 +23,7 @@ from utils.preprocessing import preprocess_window, inverse_transform_prediction
 from utils.config import (
     LOOKBACK_WINDOW, FEATURE_COLUMNS,
     VOLUME_ROLLING_WINDOW, RANGE_ROLLING_WINDOW,
+    TREND_WINDOW, TREND_BLEND_DECAY, MIN_MODEL_WEIGHT,
 )
 
 
@@ -181,22 +182,30 @@ def predict_multi_step(
         )
 
     # ── Working buffer — starts as copy of the real data ──
-    # We will append synthetic rows here and always take the last 60 for input.
     buffer = window_df[FEATURE_COLUMNS].copy().reset_index(drop=True)
 
     # ── Pre-compute statistics from REAL data only ──
-    # These never update with synthetic rows — avoids compounding stat errors.
+    # Never updated with synthetic rows — prevents compounding stat errors.
     real_close  = buffer["Close"].values.astype(float)
     real_high   = buffer["High"].values.astype(float)
     real_low    = buffer["Low"].values.astype(float)
     real_volume = buffer["Volume"].values.astype(float)
 
-    # Average High-Low range as fraction of Close (e.g. 0.025 = 2.5%)
     daily_hl_range = (real_high - real_low) / real_close
     avg_hl_pct = float(np.mean(daily_hl_range[-RANGE_ROLLING_WINDOW:]))
+    avg_volume     = float(np.mean(real_volume[-VOLUME_ROLLING_WINDOW:]))
+    last_real_close = float(real_close[-1])
 
-    # Rolling volume mean from real data
-    avg_volume = float(np.mean(real_volume[-VOLUME_ROLLING_WINDOW:]))
+    # ── Momentum correction: linear trend slope from recent real closes ──
+    # Addresses mean-reversion drift in recursive forecasting.
+    # Each synthetic row fed back into the model can reinforce a slight
+    # downward signal, causing all predictions to converge downward.
+    # We compute the recent price slope from real data and use it to
+    # blend the raw model output with a trend-anchored value, with model
+    # trust decaying as we step further into the future.
+    trend_closes = real_close[-TREND_WINDOW:]
+    slope = float(np.polyfit(np.arange(TREND_WINDOW), trend_closes, 1)[0])
+    # slope is USD per trading day (positive = uptrend, negative = downtrend)
 
     # ── Estimate last real trading date ──
     if isinstance(window_df.index, pd.DatetimeIndex):
@@ -208,26 +217,40 @@ def predict_multi_step(
     predictions = []
 
     for step in range(1, n_days + 1):
-        # Take the last 60 rows of the buffer as the current window
         current_window = buffer.tail(LOOKBACK_WINDOW).copy()
         current_window.reset_index(drop=True, inplace=True)
 
-        # Preprocess and predict
-        model_input  = preprocess_window(current_window, scaler)
-        raw_output   = model.predict(model_input, verbose=0)
-        scaled_pred  = float(raw_output[0][0])
-        pred_close   = round(inverse_transform_prediction(scaled_pred, scaler), 2)
+        # ── Raw model prediction ──
+        model_input = preprocess_window(current_window, scaler)
+        raw_output  = model.predict(model_input, verbose=0)
+        raw_close   = inverse_transform_prediction(float(raw_output[0][0]), scaler)
 
-        # ── Estimate next trading date (skip weekends) ──
+        # ── Momentum-weighted blend ──
+        # trend_anchor: where price "should" be if the recent slope continues
+        # model_weight: how much we trust the model vs the trend at this step
+        #
+        # step=1:  model_weight = 1 - 1*0.08 = 0.92  (mostly model)
+        # step=5:  model_weight = 1 - 5*0.08 = 0.60  (balanced)
+        # step=10: model_weight = max(0.30, ...)= 0.30 (mostly trend)
+        trend_anchor = last_real_close + step * slope
+        model_weight = max(MIN_MODEL_WEIGHT, 1.0 - step * TREND_BLEND_DECAY)
+        trend_weight = 1.0 - model_weight
+
+        pred_close = round(
+            model_weight * raw_close + trend_weight * trend_anchor, 2
+        )
+
+        # ── Next trading date (skip weekends) ──
         next_date = last_date + timedelta(days=1)
-        while next_date.weekday() >= 5:   # 5=Sat, 6=Sun
+        while next_date.weekday() >= 5:
             next_date += timedelta(days=1)
         last_date = next_date
 
-        # ── Build synthetic OHLCV row ──
-        # Open: previous Close (standard gap-open assumption)
-        prev_close = float(buffer["Close"].iloc[-1])
-        synth_open   = prev_close
+        # ── Synthetic OHLCV row ──
+        # Open uses last_real_close (not pred_close) to avoid feeding a
+        # persistent red-candle signal back into the model window.
+        # High/Low estimated from real data range stats.
+        synth_open   = last_real_close
         synth_high   = round(pred_close * (1 + avg_hl_pct), 4)
         synth_low    = round(pred_close * (1 - avg_hl_pct), 4)
         synth_volume = avg_volume
@@ -240,7 +263,6 @@ def predict_multi_step(
             "Volume": synth_volume,
         }])
 
-        # Append to buffer — next iteration uses this row in its window
         buffer = pd.concat([buffer, synthetic_row], ignore_index=True)
 
         predictions.append({
