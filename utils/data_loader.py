@@ -16,6 +16,8 @@ Public API:
     get_latest_window(df)      -> pd.DataFrame  [exactly 60 rows, 5 cols]
 """
 
+import io
+import requests
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
@@ -30,12 +32,12 @@ REQUIRED_COLUMNS = FEATURE_COLUMNS
 
 def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Internal helper — standardise any raw yfinance DataFrame into a
+    Internal helper — standardise any raw DataFrame into a
     clean OHLCV DataFrame ready for preprocessing.
 
     Steps:
-        1. Flatten MultiIndex columns (newer yfinance versions return these).
-        2. Keep only OHLCV columns.
+        1. Flatten MultiIndex columns (some yfinance versions return these).
+        2. Keep only OHLCV columns in correct order.
         3. Drop NaN rows.
         4. Sort index ascending (yfinance order is not guaranteed).
     """
@@ -45,7 +47,7 @@ def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(
-            f"yfinance returned unexpected columns. Missing: {missing}. "
+            f"Unexpected columns from data source. Missing: {missing}. "
             f"Got: {list(df.columns)}"
         )
 
@@ -55,53 +57,114 @@ def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Browser headers — required by Yahoo Finance since 2024 to avoid 401/empty responses
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
+
+
+def _fetch_via_direct_csv() -> pd.DataFrame:
+    """
+    Fetch OHLCV data by downloading Yahoo Finance CSV directly.
+
+    WHY THIS EXISTS:
+    Yahoo Finance changed its API in 2024 to require a crumb/cookie
+    for JSON endpoints. yfinance tries to obtain this automatically
+    but frequently fails, returning an empty JSON body — causing:
+        JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+    The v7/finance/download CSV endpoint still works with just a
+    proper User-Agent header and does not require a crumb cookie.
+    This makes it the most reliable fallback for live data.
+    """
+    end_ts   = int(datetime.today().timestamp())
+    start_ts = int((datetime.today() - timedelta(days=FETCH_DAYS_BUFFER)).timestamp())
+
+    url = (
+        f"https://query1.finance.yahoo.com/v7/finance/download/{TICKER}"
+        f"?period1={start_ts}&period2={end_ts}"
+        f"&interval=1d&events=history&includeAdjustedClose=true"
+    )
+
+    session = requests.Session()
+    session.headers.update(_HEADERS)
+
+    response = session.get(url, timeout=15)
+    response.raise_for_status()
+
+    df = pd.read_csv(
+        io.StringIO(response.text),
+        parse_dates=["Date"],
+        index_col="Date",
+    )
+
+    # CSV columns: Open, High, Low, Close, Adj Close, Volume
+    # Rename Adj Close → Close (adjusted prices preferred), drop original Close
+    if "Adj Close" in df.columns:
+        df = df.drop(columns=["Close"], errors="ignore")
+        df = df.rename(columns={"Adj Close": "Close"})
+
+    return df
+
+
 def fetch_live_data() -> pd.DataFrame:
     """
     Fetch the latest Tesla OHLCV data from Yahoo Finance.
 
-    WHY TWO METHODS?
-    ----------------
-    yf.download() suffers from a known URL-template bug in some versions:
-        YFTzMissingError: $%ticker%: possibly delisted; No timezone found
-    This happens because the ticker variable is never substituted into the
-    Yahoo Finance API URL, returning an empty JSON response.
+    THREE-METHOD FALLBACK STRATEGY:
+    --------------------------------
+    Yahoo Finance changed its API in 2024 to require session cookies
+    (crumb tokens) for JSON endpoints. Both yfinance methods attempt
+    to obtain this token automatically but fail in many environments,
+    returning an empty response body that causes:
+        JSONDecodeError: Expecting value: line 1 column 1 (char 0)
 
-    Ticker.history() uses a different internal code path but first calls
-    .info to resolve the timezone — an extra network request that can also
-    fail independently.
+    Method 1 — yf.Ticker().history() with browser session
+        Uses a custom requests.Session with real browser headers so
+        Yahoo Finance accepts the crumb request.
 
-    Solution: try Ticker.history() first. If it fails for any reason,
-    fall back to yf.download() with period= syntax (more stable than
-    start/end dates in some yfinance versions). Both paths clean through
-    the same _clean_ohlcv() helper.
+    Method 2 — yf.download() with browser session
+        Same session approach, different yfinance code path.
+
+    Method 3 — Direct CSV download (most reliable)
+        Hits the v7/finance/download endpoint directly with browser
+        headers. Does not require a crumb cookie. Pure requests + pandas.
 
     Returns:
         pd.DataFrame: Clean OHLCV DataFrame with DatetimeIndex,
                       sorted ascending, containing >= 60 trading rows.
 
     Raises:
-        ConnectionError: If both fetch methods fail.
+        ConnectionError: If all three methods fail.
         ValueError: If fewer than 60 trading days are returned.
     """
-    df       = None
-    errors   = []
+    df     = None
+    errors = []
 
-    # ── Method 1: Ticker.history() ──
-    # Preferred — avoids URL-template substitution bug in yf.download()
+    # Shared browser session — passed to yfinance to avoid crumb failures
+    session = requests.Session()
+    session.headers.update(_HEADERS)
+
+    # ── Method 1: Ticker.history() with browser session ──
     try:
-        ticker = yf.Ticker(TICKER)
+        ticker = yf.Ticker(TICKER, session=session)
         raw = ticker.history(
             period="6mo",
             auto_adjust=True,
-            actions=False,      # drops Dividends + Stock Splits columns
+            actions=False,
         )
         if raw is not None and not raw.empty:
             df = _clean_ohlcv(raw)
     except Exception as e:
-        errors.append(f"Ticker.history() failed: {e}")
+        errors.append(f"[1] Ticker.history(): {e}")
 
-    # ── Method 2: yf.download() with period= ──
-    # Fallback — period= syntax is more stable than start/end in some versions
+    # ── Method 2: yf.download() with browser session ──
     if df is None or df.empty:
         try:
             raw = yf.download(
@@ -109,21 +172,28 @@ def fetch_live_data() -> pd.DataFrame:
                 period="6mo",
                 auto_adjust=True,
                 progress=False,
-                threads=False,   # single-threaded avoids some race conditions
+                threads=False,
+                session=session,
             )
             if raw is not None and not raw.empty:
                 df = _clean_ohlcv(raw)
         except Exception as e:
-            errors.append(f"yf.download() failed: {e}")
+            errors.append(f"[2] yf.download(): {e}")
 
-    # ── Both methods failed ──
+    # ── Method 3: Direct CSV download ──
     if df is None or df.empty:
-        error_detail = " | ".join(errors)
+        try:
+            raw = _fetch_via_direct_csv()
+            if raw is not None and not raw.empty:
+                df = _clean_ohlcv(raw)
+        except Exception as e:
+            errors.append(f"[3] Direct CSV: {e}")
+
+    # ── All methods failed ──
+    if df is None or df.empty:
         raise ConnectionError(
-            "Failed to fetch TSLA data from Yahoo Finance. "
-            "Tried Ticker.history() and yf.download(). "
-            f"Errors: {error_detail}. "
-            "Fix: pip install --upgrade yfinance"
+            "All three fetch methods failed for TSLA. "
+            + " | ".join(errors)
         )
 
     if len(df) < LOOKBACK_WINDOW:
