@@ -21,7 +21,7 @@ import os
 import streamlit as st
 
 from utils.data_loader import (
-    fetch_live_data, load_csv_data,
+    load_csv_data,
     validate_dataframe, get_latest_window,
 )
 from utils.preprocessing import load_scaler, preprocess_window
@@ -52,16 +52,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-st.markdown("""
-<style>
-.main .block-container {
-    padding-top: 1rem;
-    padding-bottom: 1rem;
-    padding-left: 2rem;
-    padding-right: 2rem;
-}
-</style>
-""", unsafe_allow_html=True)
+
 st.markdown("""
 <style>
     #MainMenu, footer, header { visibility: hidden; }
@@ -321,28 +312,63 @@ def render_prediction_section(tab_key: str, source: str):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# TAB A — Live Tesla Data
+# TAB A — Live Tesla Data (placeholder)
 # ════════════════════════════════════════════════════════════════════════════
 
 with tab_live:
     st.markdown("### Live Tesla Stock Prediction")
+
     st.markdown(
-        "Fetches the latest Tesla OHLCV data from Yahoo Finance, then predicts "
-        "the next **1, 5, or 10 trading days** using the GRU model."
+        """
+        <div style="
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            border: 1px solid #2a2a2a;
+            border-radius: 16px;
+            padding: 40px 32px;
+            text-align: center;
+            margin: 16px 0;
+        ">
+            <div style="font-size: 48px; margin-bottom: 16px;">📡</div>
+            <h3 style="color: #ffffff; margin: 0 0 12px 0;">
+                Live Data Feed — Coming Soon
+            </h3>
+            <p style="color: #888; font-size: 15px; max-width: 480px;
+                       margin: 0 auto 20px auto; line-height: 1.6;">
+                Automatic fetching of real-time Tesla OHLCV data from a
+                live market data source will be integrated in a future release.
+            </p>
+            <div style="
+                display: inline-block;
+                background: #1e1e1e;
+                border: 1px solid #333;
+                border-radius: 10px;
+                padding: 16px 28px;
+                text-align: left;
+                margin-top: 8px;
+            ">
+                <p style="color: #888; font-size: 12px; text-transform: uppercase;
+                           letter-spacing: 1px; margin: 0 0 10px 0;">
+                    Planned upgrades
+                </p>
+                <p style="color: #ccc; font-size: 13px; margin: 4px 0;">
+                    ✦ &nbsp; Real-time OHLCV data via a stable market API
+                </p>
+                <p style="color: #ccc; font-size: 13px; margin: 4px 0;">
+                    ✦ &nbsp; Auto-refresh on market open / close
+                </p>
+                <p style="color: #ccc; font-size: 13px; margin: 4px 0;">
+                    ✦ &nbsp; One-click prediction without manual CSV upload
+                </p>
+            </div>
+            <p style="color: #555; font-size: 12px; margin: 24px 0 0 0;">
+                In the meantime, use the
+                <strong style="color: #888;">Upload CSV</strong> tab
+                to run predictions on your own historical data.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-
-    if st.button("Fetch Latest Tesla Data", key="btn_fetch"):
-        with st.spinner("Fetching from Yahoo Finance..."):
-            try:
-                live_df = fetch_live_data()
-                st.session_state["live_df"]           = live_df
-                st.session_state["live_predictions"]  = None
-                st.session_state["live_predict_error"]= None
-            except Exception as e:
-                st.error(f"Fetch failed: {e}")
-                st.session_state["live_df"] = None
-
-    render_prediction_section(tab_key="live", source="Yahoo Finance")
 
 
 # ════════════════════════════════════════════════════════════════════════════
