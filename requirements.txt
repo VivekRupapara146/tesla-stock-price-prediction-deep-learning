@@ -1,8 +1,24 @@
-tensorflow==2.16.1
+# ─────────────────────────────────────────────────────────────────────────────
+# Tesla Stock Price Prediction — Python Dependencies
+# ─────────────────────────────────────────────────────────────────────────────
+# Note: yfinance and requests have been removed.
+# Live data fetching is not active in the current version.
+# The app currently supports CSV upload only.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Core ML / Deep Learning
+tensorflow==2.15.0
 scikit-learn==1.4.2
 numpy==1.26.4
+
+# Data Handling
 pandas==2.2.2
-yfinance==0.2.40
+
+# Web App
 streamlit==1.35.0
+
+# Visualization
 plotly==5.22.0
+
+# Serialization (scaler loading)
 joblib==1.4.2

@@ -3,15 +3,7 @@ app.py
 ------
 Main Streamlit entry point for the Tesla Stock Price Prediction app.
 
-Responsibility:
-    UI orchestration ONLY — no data logic, no model logic.
-
-Structure:
-    1. Page config + CSS
-    2. Cached loaders (model + scaler)
-    3. Header
-    4. Model information dashboard
-    5. Prediction tabs (Live / CSV), each with horizon selector
+Responsibility: UI orchestration only.
 
 Run:
     streamlit run app.py
@@ -21,18 +13,14 @@ import os
 import streamlit as st
 
 from utils.data_loader import (
-    load_csv_data,
-    validate_dataframe, get_latest_window,
+    load_csv_data, validate_dataframe, get_latest_window,
 )
 from utils.preprocessing import load_scaler, preprocess_window
-from utils.predictor import (
-    load_model, predict,
-    predict_multi_step, get_model_metadata,
-)
+from utils.predictor import load_model, predict, predict_multi_step, get_model_metadata
 from utils.visualizer import (
+    get_theme_colors,
     plot_closing_price, plot_multi_step_forecast,
-    render_model_metrics, render_multi_step_output,
-    render_data_preview,
+    render_model_metrics, render_multi_step_output, render_data_preview,
 )
 from utils.config import PREDICTION_HORIZONS
 
@@ -55,41 +43,126 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    #MainMenu, footer, header { visibility: hidden; }
-    .stApp { background-color: #0f0f0f; }
-
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px; background-color: #1a1a1a;
-        border-radius: 12px; padding: 4px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 8px; padding: 8px 24px;
-        color: #888; font-weight: 500;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #E31937 !important; color: white !important;
-    }
-    [data-testid="stMetric"] {
-        background-color: #1a1a1a; border: 1px solid #2a2a2a;
-        border-radius: 12px; padding: 16px;
-    }
-    [data-testid="stMetricLabel"] { color: #888 !important; }
-    [data-testid="stMetricValue"] { color: #fff !important; font-size: 1.4rem !important; }
-    .stButton > button {
-        background-color: #E31937; color: white; border: none;
-        border-radius: 8px; padding: 10px 28px;
-        font-weight: 600; font-size: 15px; width: 100%;
-    }
-    .stButton > button:hover { background-color: #b5132b; }
-    hr { border-color: #2a2a2a !important; }
-    h2, h3 { color: #ffffff !important; }
-
-    /* Radio group for horizon selector */
-    div[data-testid="stRadio"] > label {
-        color: #aaa !important; font-size: 14px;
-    }
+.main .block-container {
+    padding-top: 1rem;
+    padding-bottom: 1rem;
+    padding-left: 2rem;
+    padding-right: 2rem;
+}
 </style>
 """, unsafe_allow_html=True)
+
+
+# ── Theme State ───────────────────────────────────────────────────────────────
+
+if "theme" not in st.session_state:
+    st.session_state["theme"] = "dark"
+
+theme = st.session_state["theme"]
+c     = get_theme_colors(theme)
+
+is_dark = (theme == "dark")
+
+
+# ── CSS injection ─────────────────────────────────────────────────────────────
+
+def inject_css(theme: str, c: dict) -> None:
+    """Inject full-app CSS for the active theme."""
+
+    # Tab active color, button, metric cards adapt to theme
+    tab_active_bg  = c["accent"]
+    tab_inactive   = c["subtext"]
+    metric_bg      = c["card_bg"]
+    metric_border  = c["card_border"]
+    metric_label   = c["subtext"]
+    metric_val     = c["text"]
+    btn_bg         = c["accent"]
+    btn_hover      = "#b5132b"
+    app_bg         = c["bg"]
+    hr_color       = c["card_border"]
+
+    st.markdown(
+        f"""
+        <style>
+        /* ── Global ── */
+        #MainMenu, footer, header {{ visibility: hidden; }}
+        .stApp {{ background-color: {app_bg}; }}
+
+        /* ── Tabs ── */
+        .stTabs [data-baseweb="tab-list"] {{
+            gap: 8px;
+            background-color: {metric_bg};
+            border-radius: 12px;
+            padding: 4px;
+        }}
+        .stTabs [data-baseweb="tab"] {{
+            border-radius: 8px;
+            padding: 8px 24px;
+            color: {tab_inactive};
+            font-weight: 500;
+        }}
+        .stTabs [aria-selected="true"] {{
+            background-color: {tab_active_bg} !important;
+            color: white !important;
+        }}
+
+        /* ── Metric cards ── */
+        [data-testid="stMetric"] {{
+            background-color: {metric_bg};
+            border: 1px solid {metric_border};
+            border-radius: 12px;
+            padding: 16px;
+        }}
+        [data-testid="stMetricLabel"] {{ color: {metric_label} !important; }}
+        [data-testid="stMetricValue"] {{
+            color: {metric_val} !important;
+            font-size: 1.4rem !important;
+        }}
+
+        /* ── Primary button ── */
+        .stButton > button {{
+            background-color: {btn_bg};
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 10px 28px;
+            font-weight: 600;
+            font-size: 15px;
+            width: 100%;
+        }}
+        .stButton > button:hover {{ background-color: {btn_hover}; }}
+
+        /* ── Divider ── */
+        hr {{ border-color: {hr_color} !important; }}
+
+        /* ── Headings ── */
+        h2, h3 {{ color: {c["text"]} !important; }}
+
+        /* ── Expander ── */
+        [data-testid="stExpander"] {{
+            background-color: {metric_bg};
+            border: 1px solid {metric_border};
+            border-radius: 12px;
+        }}
+
+        /* ── File uploader ── */
+        [data-testid="stFileUploader"] {{
+            background-color: {metric_bg};
+            border: 1px solid {metric_border};
+            border-radius: 8px;
+        }}
+
+        /* ── Dataframe ── */
+        [data-testid="stDataFrame"] {{
+            background-color: {metric_bg};
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+inject_css(theme, c)
 
 
 # ── Cached Loaders ────────────────────────────────────────────────────────────
@@ -104,28 +177,13 @@ def get_scaler():
     return load_scaler(SCALER_PATH)
 
 
-# ── Prediction Pipeline Helper ────────────────────────────────────────────────
+# ── Prediction Pipeline ───────────────────────────────────────────────────────
 
 def run_prediction_pipeline(df, scaler, model, n_days: int) -> list[dict]:
-    """
-    Run either single-step or multi-step prediction.
-
-    Always returns a list[dict] for uniform handling in both tabs,
-    even for n_days=1 (list of one item).
-
-    Args:
-        df     : Validated OHLCV DataFrame (>= 60 rows).
-        scaler : Fitted MinMaxScaler.
-        model  : Loaded GRU model.
-        n_days : Forecast horizon (1, 5, or 10).
-
-    Returns:
-        list[dict]: Each dict has keys: day, date, close, is_real.
-    """
-    window = get_latest_window(df)   # enforces (60, 5) + column order
+    """Run single or multi-step prediction. Always returns list[dict]."""
+    window = get_latest_window(df)
 
     if n_days == 1:
-        # Single step: use preprocess_window + predict directly
         model_input = preprocess_window(window, scaler)
         price = predict(model, model_input, scaler)
         from datetime import datetime, timedelta
@@ -138,7 +196,7 @@ def run_prediction_pipeline(df, scaler, model, n_days: int) -> list[dict]:
         return predict_multi_step(model, window, scaler, n_days)
 
 
-# ── Startup: load model + scaler ──────────────────────────────────────────────
+# ── Startup ───────────────────────────────────────────────────────────────────
 
 model_error = scaler_error = None
 model = scaler = None
@@ -154,33 +212,54 @@ except Exception as e:
     scaler_error = str(e)
 
 
-# ── Header ────────────────────────────────────────────────────────────────────
+# ── Header + Theme Toggle ─────────────────────────────────────────────────────
 
-st.markdown("""
-<div style="padding: 8px 0 24px 0;">
-    <div style="display:flex; align-items:center; gap:12px;">
-        <span style="font-size:36px;">🚗</span>
-        <div>
-            <h1 style="margin:0; color:#E31937; font-size:2rem;
-                       font-weight:700; letter-spacing:-0.5px;">
-                Tesla Stock Price Prediction
-            </h1>
-            <p style="margin:4px 0 0 0; color:#888; font-size:14px;">
-                GRU Deep Learning &nbsp;·&nbsp; 60-Day Lookback &nbsp;·&nbsp;
-                OHLCV Features &nbsp;·&nbsp; Forecast up to 10 Days
-            </p>
+header_col, toggle_col = st.columns([11, 1])
+
+with header_col:
+    st.markdown(
+        f"""
+        <div style="padding:8px 0 24px 0;">
+            <div style="display:flex;align-items:center;gap:12px;">
+                <span style="font-size:36px;">🚗</span>
+                <div>
+                    <h1 style="margin:0;color:{c['accent']};font-size:2rem;
+                               font-weight:700;letter-spacing:-0.5px;">
+                        Tesla Stock Price Prediction
+                    </h1>
+                    <p style="margin:4px 0 0 0;color:{c['subtext']};font-size:14px;">
+                        GRU Deep Learning &nbsp;·&nbsp; 60-Day Lookback
+                        &nbsp;·&nbsp; OHLCV Features &nbsp;·&nbsp;
+                        Forecast up to 10 Days
+                    </p>
+                </div>
+            </div>
         </div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
+
+with toggle_col:
+    # Vertical spacer to align button with header text
+    st.markdown("<div style='margin-top:18px;'></div>", unsafe_allow_html=True)
+    toggle_label = "☀️ Light" if is_dark else "🌙 Dark"
+    if st.button(toggle_label, key="theme_toggle"):
+        st.session_state["theme"] = "light" if is_dark else "dark"
+        st.rerun()
 
 st.divider()
 
-# ── Error banners ──
+# ── Load error banners ──
 if model_error:
-    st.error(f"**Model file missing.** Place `tesla_gru_model.keras` in `model/`.\n\n`{model_error}`")
+    st.error(
+        f"**Model file missing.** Place `tesla_gru_model.keras` in `model/`.\n\n"
+        f"`{model_error}`"
+    )
 if scaler_error:
-    st.error(f"**Scaler file missing.** Place `tesla_scaler.pkl` in `model/`.\n\n`{scaler_error}`")
+    st.error(
+        f"**Scaler file missing.** Place `tesla_scaler.pkl` in `model/`.\n\n"
+        f"`{scaler_error}`"
+    )
 
 
 # ── Model Info Dashboard ──────────────────────────────────────────────────────
@@ -189,13 +268,17 @@ with st.expander("Model Information Dashboard", expanded=True):
     meta = get_model_metadata()
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.markdown("**Model Type**"); st.markdown(f"`{meta['model_name']}`")
+        st.markdown(f"<span style='color:{c['subtext']};font-size:12px;'>MODEL TYPE</span>", unsafe_allow_html=True)
+        st.markdown(f"`{meta['model_name']}`")
     with c2:
-        st.markdown("**Input Window**"); st.markdown("`60 Trading Days`")
+        st.markdown(f"<span style='color:{c['subtext']};font-size:12px;'>INPUT WINDOW</span>", unsafe_allow_html=True)
+        st.markdown("`60 Trading Days`")
     with c3:
-        st.markdown("**Features**"); st.markdown("`Open · High · Low · Close · Volume`")
+        st.markdown(f"<span style='color:{c['subtext']};font-size:12px;'>FEATURES</span>", unsafe_allow_html=True)
+        st.markdown("`Open · High · Low · Close · Volume`")
     with c4:
-        st.markdown("**Target**"); st.markdown("`Next Day Closing Price`")
+        st.markdown(f"<span style='color:{c['subtext']};font-size:12px;'>TARGET</span>", unsafe_allow_html=True)
+        st.markdown(f"`{meta['target']}`")
     st.markdown("##### Performance Metrics")
     render_model_metrics(meta)
 
@@ -211,44 +294,34 @@ tab_live, tab_csv = st.tabs([
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SHARED PREDICTION SECTION — rendered identically in both tabs
+# SHARED PREDICTION UI — used by CSV tab
 # ════════════════════════════════════════════════════════════════════════════
 
-def render_prediction_section(tab_key: str, source: str):
-    """
-    Render the full prediction UI for one tab.
-
-    tab_key : 'live' or 'csv'  — used to namespace session_state keys.
-    source  : 'Yahoo Finance' or 'Uploaded CSV' — shown in cards + charts.
-    """
-    df_key         = f"{tab_key}_df"
-    pred_key       = f"{tab_key}_predictions"
-    err_key        = f"{tab_key}_predict_error"
-    horizon_key    = f"{tab_key}_horizon"
-
-    df = st.session_state.get(df_key)
+def render_prediction_section(tab_key: str, source: str) -> None:
+    """Render data preview + horizon selector + prediction output for one tab."""
+    df = st.session_state.get(f"{tab_key}_df")
     if df is None:
-        return   # nothing fetched/uploaded yet — nothing to show
+        return
 
-    # ── Data preview + historical chart ──
+    # Data preview + trend chart
     st.markdown("#### Last 60 Trading Days")
     render_data_preview(df.tail(60), source=source)
 
     st.markdown("#### Closing Price Trend")
     st.plotly_chart(
-        plot_closing_price(df.tail(60), source=source),
+        plot_closing_price(df.tail(60), source=source, theme=theme),
         use_container_width=True,
     )
 
     st.divider()
 
-    # ── Prediction horizon selector ──
+    # Horizon selector
     st.markdown("#### Prediction Horizon")
     horizon_label = st.radio(
         "Select forecast window:",
         options=list(PREDICTION_HORIZONS.keys()),
         horizontal=True,
-        key=horizon_key,
+        key=f"{tab_key}_horizon",
         help=(
             "Next Day: single prediction using 60 real trading days.  \n"
             "5 / 10 Days: recursive forecast — error compounds with each step."
@@ -256,59 +329,49 @@ def render_prediction_section(tab_key: str, source: str):
     )
     n_days = PREDICTION_HORIZONS[horizon_label]
 
-    # Context note for multi-step
     if n_days > 1:
         st.info(
-            f"**{horizon_label} forecast** uses recursive prediction: each predicted "
-            f"day is fed back as input for the next. "
+            f"**{horizon_label} forecast** uses recursive prediction. "
             f"Day 1 uses 60 real rows. By day {n_days}, {n_days - 1} synthetic "
             f"rows are in the window. Confidence decreases with each step."
         )
 
-    # ── Predict button ──
-    predict_disabled = (model is None or scaler is None)
-    if predict_disabled:
+    # Predict button
+    if model is None or scaler is None:
         st.warning("Prediction unavailable — model or scaler file missing.")
         return
 
     btn_label = (
-        "Predict Next Day Closing Price"
-        if n_days == 1
+        "Predict Next Day Closing Price" if n_days == 1
         else f"Predict Next {n_days} Days"
     )
 
     if st.button(btn_label, key=f"btn_predict_{tab_key}"):
-        spinner_msg = (
-            "Running GRU inference..."
-            if n_days == 1
+        with st.spinner(
+            "Running GRU inference..." if n_days == 1
             else f"Running recursive GRU forecast for {n_days} days..."
-        )
-        with st.spinner(spinner_msg):
+        ):
             try:
-                predictions = run_prediction_pipeline(df, scaler, model, n_days)
-                st.session_state[pred_key]  = predictions
-                st.session_state[err_key]   = None
+                preds = run_prediction_pipeline(df, scaler, model, n_days)
+                st.session_state[f"{tab_key}_predictions"] = preds
+                st.session_state[f"{tab_key}_predict_error"] = None
             except Exception as e:
-                st.session_state[err_key]   = str(e)
-                st.session_state[pred_key]  = None
+                st.session_state[f"{tab_key}_predict_error"] = str(e)
+                st.session_state[f"{tab_key}_predictions"] = None
 
-    # ── Error ──
-    if st.session_state.get(err_key):
-        st.error(f"Prediction failed: {st.session_state[err_key]}")
+    if st.session_state.get(f"{tab_key}_predict_error"):
+        st.error(f"Prediction failed: {st.session_state[f'{tab_key}_predict_error']}")
 
-    # ── Results ──
-    predictions = st.session_state.get(pred_key)
-    if predictions:
-        # Show forecast chart for multi-step, prediction card for single
-        if len(predictions) > 1:
+    preds = st.session_state.get(f"{tab_key}_predictions")
+    if preds:
+        if len(preds) > 1:
             st.markdown("#### Forecast Chart")
             st.plotly_chart(
-                plot_multi_step_forecast(df.tail(60), predictions),
+                plot_multi_step_forecast(df.tail(60), preds, theme=theme),
                 use_container_width=True,
             )
-
         st.markdown("#### Prediction Result")
-        render_multi_step_output(predictions, source=source)
+        render_multi_step_output(preds, source=source, theme=theme)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -317,53 +380,35 @@ def render_prediction_section(tab_key: str, source: str):
 
 with tab_live:
     st.markdown("### Live Tesla Stock Prediction")
-
     st.markdown(
-        """
-        <div style="
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            border: 1px solid #2a2a2a;
-            border-radius: 16px;
-            padding: 40px 32px;
-            text-align: center;
-            margin: 16px 0;
-        ">
-            <div style="font-size: 48px; margin-bottom: 16px;">📡</div>
-            <h3 style="color: #ffffff; margin: 0 0 12px 0;">
+        f"""
+        <div style="background:linear-gradient(135deg,{c['card_bg']} 0%,{c['bg']} 100%);
+                    border:1px solid {c['card_border']};border-radius:16px;
+                    padding:40px 32px;text-align:center;margin:16px 0;">
+            <div style="font-size:48px;margin-bottom:16px;">📡</div>
+            <h3 style="color:{c['text']};margin:0 0 12px 0;">
                 Live Data Feed — Coming Soon
             </h3>
-            <p style="color: #888; font-size: 15px; max-width: 480px;
-                       margin: 0 auto 20px auto; line-height: 1.6;">
+            <p style="color:{c['subtext']};font-size:15px;max-width:480px;
+                       margin:0 auto 20px auto;line-height:1.6;">
                 Automatic fetching of real-time Tesla OHLCV data from a
                 live market data source will be integrated in a future release.
             </p>
-            <div style="
-                display: inline-block;
-                background: #1e1e1e;
-                border: 1px solid #333;
-                border-radius: 10px;
-                padding: 16px 28px;
-                text-align: left;
-                margin-top: 8px;
-            ">
-                <p style="color: #888; font-size: 12px; text-transform: uppercase;
-                           letter-spacing: 1px; margin: 0 0 10px 0;">
-                    Planned upgrades
-                </p>
-                <p style="color: #ccc; font-size: 13px; margin: 4px 0;">
-                    ✦ &nbsp; Real-time OHLCV data via a stable market API
-                </p>
-                <p style="color: #ccc; font-size: 13px; margin: 4px 0;">
-                    ✦ &nbsp; Auto-refresh on market open / close
-                </p>
-                <p style="color: #ccc; font-size: 13px; margin: 4px 0;">
-                    ✦ &nbsp; One-click prediction without manual CSV upload
-                </p>
+            <div style="display:inline-block;background:{c['bg']};
+                        border:1px solid {c['card_border']};border-radius:10px;
+                        padding:16px 28px;text-align:left;margin-top:8px;">
+                <p style="color:{c['subtext']};font-size:12px;text-transform:uppercase;
+                           letter-spacing:1px;margin:0 0 10px 0;">Planned upgrades</p>
+                <p style="color:{c['text']};font-size:13px;margin:4px 0;">
+                    ✦ &nbsp; Real-time OHLCV data via a stable market API</p>
+                <p style="color:{c['text']};font-size:13px;margin:4px 0;">
+                    ✦ &nbsp; Auto-refresh on market open / close</p>
+                <p style="color:{c['text']};font-size:13px;margin:4px 0;">
+                    ✦ &nbsp; One-click prediction without manual CSV upload</p>
             </div>
-            <p style="color: #555; font-size: 12px; margin: 24px 0 0 0;">
+            <p style="color:{c['subtext']};font-size:12px;margin:24px 0 0 0;">
                 In the meantime, use the
-                <strong style="color: #888;">Upload CSV</strong> tab
-                to run predictions on your own historical data.
+                <strong>Upload CSV</strong> tab to run predictions.
             </p>
         </div>
         """,
@@ -401,7 +446,9 @@ with tab_csv:
                 if not is_valid:
                     st.error(f"Validation failed: {msg}")
                 else:
-                    st.success(f"Loaded — {len(csv_df)} rows · {len(csv_df.columns)} columns")
+                    st.success(
+                        f"Loaded — {len(csv_df)} rows · {len(csv_df.columns)} columns"
+                    )
                     st.session_state["csv_df"]           = csv_df
                     st.session_state["csv_predictions"]  = None
                     st.session_state["csv_predict_error"]= None
@@ -416,9 +463,9 @@ with tab_csv:
 
 st.divider()
 st.markdown(
-    "<p style='text-align:center; color:#444; font-size:12px;'>"
-    "Tesla Stock Price Prediction &nbsp;·&nbsp; GRU Deep Learning &nbsp;·&nbsp;"
-    " For educational purposes only &nbsp;·&nbsp; Not financial advice"
+    f"<p style='text-align:center;color:{c['subtext']};font-size:12px;'>"
+    "Tesla Stock Price Prediction &nbsp;·&nbsp; GRU Deep Learning "
+    "&nbsp;·&nbsp; For educational purposes only &nbsp;·&nbsp; Not financial advice"
     "</p>",
     unsafe_allow_html=True,
 )

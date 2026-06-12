@@ -24,11 +24,6 @@ N_FEATURES = len(FEATURE_COLUMNS)  # 5
 # Must match the lookback window used during GRU training
 LOOKBACK_WINDOW = 60
 
-# ── Data Fetching ─────────────────────────────────────────────────────────────
-# Fetch buffer in calendar days — must be larger than LOOKBACK_WINDOW
-# to account for weekends + holidays (60 trading days ≈ 90 calendar days)
-FETCH_DAYS_BUFFER = 120
-
 # ── Model Files ───────────────────────────────────────────────────────────────
 MODEL_FILENAME  = "tesla_gru_model.keras"
 SCALER_FILENAME = "tesla_scaler.pkl"
